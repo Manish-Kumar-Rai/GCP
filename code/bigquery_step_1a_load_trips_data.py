@@ -2,7 +2,8 @@ from google.cloud import bigquery
 
 PROJECT_ID = "gcp-learning-494920"
 GCS_NAME = "manish-gcp-learning"
-GCS_URI = f"gs://{GCS_NAME}/chapter3/datasets/trips/20180101/*.json"
+# GCS_URI = f"gs://{GCS_NAME}/chapter3/datasets/trips/20180101/*.json"
+GCS_URI = f"gs://{GCS_NAME}/chapter3/datasets/trips/20180102/*.json"
 
 client = bigquery.Client()
 
