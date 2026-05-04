@@ -18,3 +18,26 @@ gcloud composer environments storage dags delete
 [DAG Python file].py
 
 best way is to use gsutil
+
+
+You will get the benefit of using environment variables when you need to declare the
+parameter with the DAG deployment. For example, in our gcloud command, you can
+input an environment variable as one of the arguments, like this:
+gcloud beta composer environments create --env-
+variables=['MYSQL_INSTANCE_NAME'='mysql_instance']
+
+In Cloud Composer, you can run backfilling using the gcloud command, like this:
+gcloud composer environments run \ ${your_composer_environment_
+name} \
+--location [your composer environment region] \
+backfill -- -s [your backfill start date] \
+-e [your backfill end date] [your dag id]
+
+You can trigger a rerun from the Airflow web UI. In the web UI, if you click Clear in
+either the DAG or task indicator (in the DAG Tree View), the DAG or task will retry, and
+that's what we call a rerun. A second option is using the gcloud command, like this:
+gcloud composer environments run \
+[your composer environment name] \
+--location [your composer environment region] \
+clear -- [your dag id] -t [your tasks id or regex] -s \
+[your start date] -d [your end date]
