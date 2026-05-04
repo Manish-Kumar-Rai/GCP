@@ -1,0 +1,18 @@
+gs://us-central1-composer-1-0427bc95-bucket/dags/
+
+To deploy our DAG Python file into Cloud Composer, we need to call the gcloud
+command from our Cloud Shell, as follows:
+
+gcloud composer environments storage dags import \
+  --environment YOUR_ENV_NAME \
+  --location YOUR_REGION \
+  --source your_dag.py
+
+This also applies to deletion. If you somehow delete a file inside this directory, your DAG
+will also be deleted, so don't do that. Instead, to delete a DAG properly, we will use the
+following gcloud command:
+
+gcloud composer environments storage dags delete
+--environment [Your Cloud composer environment name]
+--location [Your Cloud composer region]
+[DAG Python file].py
