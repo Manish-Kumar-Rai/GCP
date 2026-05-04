@@ -16,3 +16,5 @@ gcloud composer environments storage dags delete
 --environment [Your Cloud composer environment name]
 --location [Your Cloud composer region]
 [DAG Python file].py
+
+best way is to use gsutil
