@@ -76,7 +76,8 @@ with DAG(
                     "datasetId": "composer_raw_bikesharing",
                     "tableId": "temporary_stations_count"
                 },
-                "writeDisposition": "WRITE_TRUNCATE"
+                "writeDisposition": "WRITE_TRUNCATE",
+                "priority": "BATCH"
             }
         }
     )
