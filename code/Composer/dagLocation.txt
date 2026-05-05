@@ -41,3 +41,7 @@ gcloud composer environments run \
 --location [your composer environment region] \
 clear -- [your dag id] -t [your tasks id or regex] -s \
 [your start date] -d [your end date]
+
+For Cloud Composer, delete the environment by running the following command:
+# gcloud composer environments delete [CLOUD COMPOSER
+ENVIRONMENT_NAME] --location [LOCATION]

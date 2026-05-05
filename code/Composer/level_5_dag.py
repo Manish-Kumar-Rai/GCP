@@ -1,0 +1,256 @@
+import os
+import json
+import datetime as d
+import pendulum
+
+from airflow.providers.google.cloud.operators.cloud_sql import CloudSQLExportInstanceOperator
+from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
+from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from airflow.providers.google.cloud.transfers.gcs_to_gcs import GCSToGCSOperator
+from airflow.providers.google.cloud.operators.bigquery import BigQueryCheckOperator
+from airflow.providers.google.cloud.transfers.bigquery_to_gcs import BigQueryToGCSOperator
+from airflow import DAG
+from airflow.models import Variable
+
+args = {
+    "owner":"manish",
+    "start_date":pendulum.datetime(2018,1,1,tz="UTC"),
+    "end_date":pendulum.datetime(2018,1,3,tz="UTC"),
+    "retries":1,
+    "retry_delay": d.timedelta(minutes=10)
+}
+
+def read_json_schema(gcs_file_path):
+    with open(gcs_file_path) as file:
+        schema_json=json.load(file)
+    return schema_json
+
+#Environment Variables
+gcp_project_id = os.environ.get("GCP_PROJECT")
+instance_name = os.environ.get("MYSQL_INSTANCE_NAME")
+
+# Airflow Variables
+settings = Variable.get("level_3_dag_settings",deserialize_json=True)
+
+# DAG Variables
+gcs_source_data_bucket = settings["gcs_source_data_bucket"]
+bq_raw_dataset         = settings['bq_raw_dataset']
+bq_dwh_dataset         = settings['bq_dwh_dataset']
+
+# Macro Variable : variable that show dag run info
+execution_date = "{{ ds }}"
+execution_date_nodash = "{{ ds_nodash }}"
+
+stations_source_object = "chapter4/mysql_export/from_composer/stations/stations.csv"
+sql_query = "SELECT * FROM apps_db.stations;"
+
+export_body = {
+    "exportContext": {
+        "fileType": "csv",
+        "uri": f"gs://{gcs_source_data_bucket}/{stations_source_object}",
+        "csvExportOptions": {
+            "selectQuery": sql_query
+        }
+    }
+}
+
+bq_stations_table_name = "stations"
+bq_stations_table_id = f"{gcp_project_id}.{bq_raw_dataset}.{bq_stations_table_name}"
+bq_stations_table_schema = read_json_schema("/home/airflow/gcs/data/schema/stations_schema.json")
+
+# Regions
+gcs_regions_source_object = "chapter3/datasets/regions/regions.csv"
+gcs_regions_target_object = "chapter4/regions/regions.csv"
+bq_regions_table_name = "regions"
+bq_regions_table_id = f"{gcp_project_id}.{bq_raw_dataset}.{bq_regions_table_name}"
+bq_regions_table_schema = read_json_schema("/home/airflow/gcs/data/schema/regions_schema.json")
+
+# Trips
+bq_temporary_extract_dataset_name = "temporary_staging"
+bq_temporary_extract_table_name = "trips"
+bq_temporary_table_id = f"{gcp_project_id}.{bq_temporary_extract_dataset_name}.{bq_temporary_extract_table_name}_{execution_date_nodash}"
+
+gcs_trips_source_object = f"chapter4/trips/{execution_date_nodash}/*.csv"
+gcs_trips_source_uri = f"gs://{gcs_source_data_bucket}/{gcs_trips_source_object}"
+
+bq_trips_table_name = "trips_composer"
+bq_trips_table_id = f"{gcp_project_id}.{bq_raw_dataset}.{bq_trips_table_name}"
+bq_trips_table_schema = read_json_schema("/home/airflow/gcs/data/schema/trips_schema.json")
+
+# DWH
+bq_fact_trips_daily_table_name = "facts_trips_daily_composer"
+bq_fact_trips_daily_table_id = f"{gcp_project_id}.{bq_dwh_dataset}.{bq_fact_trips_daily_table_name}${execution_date_nodash}"
+
+bq_dim_stations_table_name = "dim_stations_composer"
+bq_dim_stations_table_id = f"{gcp_project_id}.{bq_dwh_dataset}.{bq_dim_stations_table_name}"
+
+with DAG(
+    dag_id = "level_3_dag_parameters_v2",
+    default_args=args,
+    catchup=True,
+    schedule="@daily",
+    max_active_runs=1,
+    dagrun_timeout=d.timedelta(minutes=15)
+) as dag:
+    
+    ### Load Station Table ###
+    export_mysql_station = CloudSQLExportInstanceOperator(
+        task_id = "export_mysql_station",
+        body=export_body,
+        project_id=gcp_project_id,
+        instance=instance_name
+    )
+
+    gcs_to_bq_station = GCSToBigQueryOperator(
+        task_id="gcs_to_bq_station",
+        bucket=gcs_source_data_bucket,
+        source_objects=[stations_source_object],
+        destination_project_dataset_table= bq_stations_table_id,
+        schema_fields = bq_stations_table_schema,
+        write_disposition="WRITE_TRUNCATE"
+    )
+
+    ### Load Region Table ###
+    gcs_to_gcs_region = GCSToGCSOperator(
+        task_id="gcs_to_gcs_region",
+        source_bucket=gcs_source_data_bucket,
+        source_objects=[gcs_regions_source_object],
+        destination_bucket=gcs_source_data_bucket,
+        destination_object=gcs_regions_target_object
+    )
+
+    gcs_to_bq_region = GCSToBigQueryOperator(
+        task_id="gcs_to_bq_region",
+        bucket=gcs_source_data_bucket,
+        source_objects=[gcs_regions_target_object],
+        destination_project_dataset_table= bq_regions_table_id,
+        schema_fields = bq_regions_table_schema,
+        write_disposition="WRITE_TRUNCATE"
+    )
+
+    ### Load Trips Table ###
+    bq_to_bq_temp_trips = BigQueryInsertJobOperator(
+        task_id="bq_to_bq_temp_trips",
+        configuration={
+            "query": {
+                "query": f"""SELECT * FROM `bigquery-public-data.san_francisco_bikeshare.bikeshare_trips`
+        WHERE DATE(start_date) = DATE('{execution_date}')
+            """,
+            "useLegacySql":False,
+            "destinationTable": {
+                "projectId":gcp_project_id,
+                "datasetId":bq_temporary_extract_dataset_name,
+                "tableId":bq_temporary_extract_table_name
+            },
+            "writeDisposition": "WRITE_TRUNCATE",
+            "createDisposition": "CREATE_IF_NEEDED",
+            "priority":"BATCH"
+            }
+        }
+    )
+
+    bq_to_gcs_extract_trips = BigQueryToGCSOperator(
+        task_id="bq_to_gcs_extract_trips",
+        source_project_dataset_table=bq_temporary_table_id,
+        destination_cloud_storage_uris=[gcs_trips_source_uri],
+        print_header=False,
+        export_format="CSV"
+    )
+
+    gcs_to_bq_trips = GCSToBigQueryOperator(
+        task_id="gcs_to_bq_trips",
+        bucket=gcs_source_data_bucket,
+        source_objects=[gcs_trips_source_object],
+        destination_project_dataset_table = bq_trips_table_id + f"${execution_date_nodash}",
+        schema_fields=bq_trips_table_schema,
+        time_partitioning={"time_partitioning_type":"DAY","field":"start_date"}
+        write_disposition="WRITE_TRUNCATE"
+    )
+
+    ### Load DWH Tables ###
+    dwh_fact_trips_daily = BigQueryInsertJobOperator(
+        task_id="dwh_fact_trips_daily",
+        configuration={
+            "query": {
+                "query": f"""SELECT DATE(start_date) as trip_date,
+                                      start_station_id,
+                                      COUNT(trip_id) as total_trips,
+                                      SUM(duration_sec) as sum_duration_sec,
+                                      AVG(duration_sec) as avg_duration_sec
+                                      FROM `{bq_trips_table_id}`
+                                      WHERE DATE(start_date) = DATE('{execution_date}')
+                                      GROUP BY trip_date, start_station_id
+            """,
+            "useLegacySql":False,
+            "destinationTable": {
+                "projectId":gcp_project_id,
+                "datasetId":bq_dwh_dataset,
+                "tableId":bq_fact_trips_daily_table_name
+            },
+            "writeDisposition": "WRITE_APPEND",
+            "createDisposition": "CREATE_IF_NEEDED",
+            "priority":"BATCH"
+            }
+        }
+    )
+
+    dwh_dim_stations = BigQueryInsertJobOperator(
+        task_id="dwh_dim_stations",
+        configuration={
+            "query": {
+                "query": f"""SELECT station_id,
+                                      stations.name as station_name,
+                                      regions.name as region_name,
+                                      capacity
+                                      FROM `{bq_stations_table_id}` stations
+                                      JOIN `{bq_regions_table_id}` regions
+                                      ON stations.region_id = CAST(regions.region_id AS STRING)
+            """,
+            "useLegacySql":False,
+            "destinationTable": {
+                "projectId":gcp_project_id,
+                "datasetId":bq_dwh_dataset,
+                "tableId":bq_dim_stations_table_name
+            },
+            "writeDisposition": "WRITE_TRUNCATE",
+            "createDisposition": "CREATE_IF_NEEDED",
+            "priority":"BATCH"
+            }
+        }
+    )
+
+    ### BQ Row Count Checker ###
+    bq_row_count_check_dwh_fact_trips_daily = BigQueryCheckOperator(
+        task_id="bq_row_count_check_dwh_fact_trips_daily",
+        use_legacy_sql=False,
+        sql=f"""
+        select count(*) from `{bq_fact_trips_daily_table_id}`
+        """
+    )
+
+    bq_row_count_check_dwh_dim_stations = BigQueryCheckOperator(
+        task_id="bq_row_count_check_dwh_dim_stations",
+        use_legacy_sql=False,
+        sql=f"""
+        select count(*) from `{bq_dim_stations_table_id}`
+        """
+    )
+
+    send_dag_success_signal = GCSToGCSOperator(
+        task_id="send_dag_success_signal",
+        source_bucket = gcs_source_data_bucket,
+        source_object=f'chapter-4/data/signal/_SUCCESS',
+        destination_bucket=gcs_source_data_bucket,
+        destination_object=f'chapter-4/data/signal/staging/level_5_dag_sensor/{execution_date_nodash}/_SUCCESS'
+    )
+
+    ### Load Data Mart ###
+    export_mysql_station >> gcs_to_bq_station
+    gcs_to_gcs_region >> gcs_to_bq_region
+    bq_to_bq_temp_trips >> bq_to_gcs_extract_trips >> gcs_to_bq_trips
+
+    [gcs_to_bq_station,gcs_to_bq_trips,gcs_to_bq_region] >> dwh_fact_trips_daily >> bq_row_count_check_dwh_fact_trips_daily
+
+    [gcs_to_bq_station,gcs_to_bq_trips,gcs_to_bq_region] >> dwh_dim_stations >> bq_row_count_check_dwh_dim_stations
+
+    [bq_row_count_check_dwh_fact_trips_daily,bq_row_count_check_dwh_dim_stations] >> send_dag_success_signal
