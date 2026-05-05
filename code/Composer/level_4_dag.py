@@ -15,9 +15,9 @@ from airflow.models import Variable
 args = {
     "owner":"manish",
     "start_date":pendulum.datetime(2018,1,1,tz="UTC"),
-    "end_date":pendulum.datetime(2018,1,5,tz="UTC"),
+    "end_date":pendulum.datetime(2018,1,3,tz="UTC"),
     "retries":1,
-    "retry_delay": d.timedelta(minutes=5)
+    "retry_delay": d.timedelta(minutes=10)
 }
 
 def read_json_schema(gcs_file_path):
@@ -39,6 +39,7 @@ bq_dwh_dataset         = settings['bq_dwh_dataset']
 
 # Macro Variable : variable that show dag run info
 execution_date = "{{ ds }}"
+execution_date_nodash = "{{ ds_nodash }}"
 
 stations_source_object = "chapter4/mysql_export/from_composer/stations/stations.csv"
 sql_query = "SELECT * FROM apps_db.stations;"
@@ -67,9 +68,9 @@ bq_regions_table_schema = read_json_schema("/home/airflow/gcs/data/schema/region
 # Trips
 bq_temporary_extract_dataset_name = "temporary_staging"
 bq_temporary_extract_table_name = "trips"
-bq_temporary_table_id = f"{gcp_project_id}.{bq_temporary_extract_dataset_name}.{bq_temporary_extract_table_name}"
+bq_temporary_table_id = f"{gcp_project_id}.{bq_temporary_extract_dataset_name}.{bq_temporary_extract_table_name}_{execution_date_nodash}"
 
-gcs_trips_source_object = "chapter4/trips/trips.csv"
+gcs_trips_source_object = f"chapter4/trips/{execution_date_nodash}/*.csv"
 gcs_trips_source_uri = f"gs://{gcs_source_data_bucket}/{gcs_trips_source_object}"
 
 bq_trips_table_name = "trips_composer"
@@ -78,7 +79,7 @@ bq_trips_table_schema = read_json_schema("/home/airflow/gcs/data/schema/trips_sc
 
 # DWH
 bq_fact_trips_daily_table_name = "facts_trips_daily_composer"
-bq_fact_trips_daily_table_id = f"{gcp_project_id}.{bq_dwh_dataset}.{bq_fact_trips_daily_table_name}"
+bq_fact_trips_daily_table_id = f"{gcp_project_id}.{bq_dwh_dataset}.{bq_fact_trips_daily_table_name}${execution_date_nodash}"
 
 bq_dim_stations_table_name = "dim_stations_composer"
 bq_dim_stations_table_id = f"{gcp_project_id}.{bq_dwh_dataset}.{bq_dim_stations_table_name}"
@@ -88,6 +89,7 @@ with DAG(
     default_args=args,
     catchup=True,
     schedule="@daily",
+    max_active_runs=1,
     dagrun_timeout=d.timedelta(minutes=15)
 ) as dag:
     
@@ -159,9 +161,10 @@ with DAG(
         task_id="gcs_to_bq_trips",
         bucket=gcs_source_data_bucket,
         source_objects=[gcs_trips_source_object],
-        destination_project_dataset_table = bq_trips_table_id,
+        destination_project_dataset_table = bq_trips_table_id + f"${execution_date_nodash}",
         schema_fields=bq_trips_table_schema,
-        write_disposition="WRITE_APPEND"
+        time_partitioning={"time_partitioning_type":"DAY","field":"start_date"}
+        write_disposition="WRITE_TRUNCATE"
     )
 
     ### Load DWH Tables ###
@@ -184,7 +187,7 @@ with DAG(
                 "datasetId":bq_dwh_dataset,
                 "tableId":bq_fact_trips_daily_table_name
             },
-            "writeDisposition": "WRITE_TRUNCATE",
+            "writeDisposition": "WRITE_APPEND",
             "createDisposition": "CREATE_IF_NEEDED",
             "priority":"BATCH"
             }
@@ -241,8 +244,3 @@ with DAG(
     [gcs_to_bq_station,gcs_to_bq_trips,gcs_to_bq_region] >> dwh_fact_trips_daily >> bq_row_count_check_dwh_fact_trips_daily
 
     [gcs_to_bq_station,gcs_to_bq_trips,gcs_to_bq_region] >> dwh_dim_stations >> bq_row_count_check_dwh_dim_stations
-
-    
-    
-    
-
